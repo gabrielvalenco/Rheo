@@ -2,13 +2,13 @@
 
 ```mermaid
 flowchart LR
-  Client -->|upload (multipart)| API
+  Client -->|upload multipart| API
   API -->|stream to disk| Uploads
   API -->|enqueue job| Queue
   Queue --> Worker
   Worker -->|HLS outputs| MinIO
   Player -->|GET playlists| Streaming
-  Streaming -. Range 206 and piping .-> MinIO
+  Streaming -.-|Range 206 and piping| MinIO
   API --- Streaming
 ```
 
