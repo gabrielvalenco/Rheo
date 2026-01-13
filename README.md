@@ -1,52 +1,102 @@
-# Servidor de Streaming de Vídeo (HLS) com Node, MinIO, FFmpeg e BullMQ
+# Video Streaming Server (HLS) with Node, MinIO, FFmpeg and BullMQ
 
-## Visão Geral
-Este projeto implementa uma API estilo Netflix/YouTube que:
-- Recebe upload de vídeos via stream sem carregar na RAM
-- Enfileira processamento em background (BullMQ/Redis)
-- Converte para HLS com três qualidades: 360p, 720p e 1080p (FFmpeg)
-- Publica playlists e segmentos no MinIO (compatível com S3)
-- Serve HLS e segmentos com suporte a Range (HTTP 206 Partial Content)
+```mermaid
+flowchart LR
+  U[Client] -->|multipart/form-data| A[API (Express)]
+  A -->|stream→disk| D[Uploads Storage]
+  A -->|enqueue| Q[BullMQ (Redis)]
+  Q --> W[Worker (FFmpeg)]
+  W -->|HLS outputs| M[(MinIO S3)]
+  P[HLS Player] -->|GET master/variants| S[Streaming Endpoints]
+  S -. Range 206 & stream .-> M
+  A --- S
+```
+
+## Snapshot (10s read)
+- Upload via stream, no RAM buffering (Busboy + `createWriteStream`)
+- Background transcode queue (BullMQ on Redis)
+- FFmpeg HLS ladder: 360p, 720p, 1080p
+- Assets stored on MinIO (S3-compatible)
+- Streaming endpoints support Range (HTTP 206) and direct piping
 
 ## Stack
 - Node.js + Express
-- FFmpeg (instalado no container da API)
+- FFmpeg (installed in the API container)
 - BullMQ (Redis)
-- MinIO (S3 compatível)
+- MinIO (S3-compatible)
 
-## Subir Localmente com Docker
+## Quick Start (Docker)
+- Create data folders:
 
-1. Crie as pastas de dados:
 ```
 mkdir storage minio-data
 ```
 
-2. Suba os serviços:
+- Start services:
+
 ```
 docker compose up -d --build
 ```
 
-3. Endpoints:
-- `POST http://localhost:3000/upload` com `multipart/form-data` campo `file`
-- Após processado: 
+- MinIO Console: `http://localhost:9001` (`minioadmin`/`minioadmin`)
+- Health: `GET http://localhost:3000/health`
+
+## API Endpoints
+- Upload: `POST http://localhost:3000/upload` (multipart/form-data, field `file`)
+- Playback:
   - `GET http://localhost:3000/videos/:id/hls/master.m3u8`
   - `GET http://localhost:3000/videos/:id/hls/360p.m3u8`
   - `GET http://localhost:3000/videos/:id/hls/720p.m3u8`
   - `GET http://localhost:3000/videos/:id/hls/1080p.m3u8`
-  - Segmentos via `GET http://localhost:3000/videos/:id/hls/<segmento.ts>`
+  - Segments: `GET http://localhost:3000/videos/:id/hls/<segment.ts>`
 
-## Fluxo
-1. Upload: `Busboy` faz stream do arquivo para disco (`storage/uploads/<id>.mp4`)
-2. Enqueue: cria job na fila `video-transcode`
-3. Worker: roda `ffmpeg` gerando HLS (m3u8 + ts) em diretório temporário
-4. Publicação: faz upload de todos os arquivos para MinIO em `videos/<id>/hls/*`
-5. Streaming: a API lê direto do MinIO e responde com Range/206 quando solicitado
+## Data Flow
+1. Upload: Busboy streams file to disk (`storage/uploads/<id>.mp4`) without buffering
+2. Queue: API enqueues job `video-transcode`
+3. Worker: spawns `ffmpeg` and produces HLS (m3u8 + ts) into local folder
+4. Publish: uploads all HLS files to MinIO under `videos/<id>/hls/*`
+5. Stream: API serves playlists/segments by streaming from MinIO, honoring byte ranges
 
-## Variáveis de Ambiente
-Veja `.env.example`. Em Docker, já são definidas no `docker-compose.yml`.
+## Technical Details
+- Node Streams
+  - Upload: `file.pipe(fs.createWriteStream(...))`
+  - Streaming: MinIO `getObject` / `getPartialObject` → `stream.pipe(res)`
+- Range Headers (HTTP 206)
+  - Parse `Range: bytes=start-end`, set `Content-Range`, `Accept-Ranges`, `Content-Length`
+  - Partial content returned via `getPartialObject(bucket, key, start, length)`
+- FFmpeg HLS Profiles
+  - 360p: ~800k video, 96k audio
+  - 720p: ~2000k video, 128k audio
+  - 1080p: ~5000k video, 192k audio
+  - HLS VOD playlists (`hls_time=4`, segment filenames per variant)
+- Storage (MinIO)
+  - Bucket: `videos`
+  - Layout: `videos/<id>/hls/{360p.m3u8,720p.m3u8,1080p.m3u8,*.ts}`
+- Master Playlist
+  - Served dynamically by API with three variants and bandwidth hints
 
-## Observações
-- O worker é inicializado junto com a API para simplicidade.
-- Para DASH, bastaria alterar o comando do FFmpeg e rotas de publicação.
-- Em produção, sugere-se separar API e Worker em processos/containers distintos.
+## Environment Variables
+- See `.env.example` for local dev; Docker compose sets these for you
+- Core vars: `PORT`, `STORAGE_PATH`, `MINIO_*`, `S3_BUCKET`, `REDIS_URL`
+
+## Ops Notes
+- Worker runs within API process for simplicity; in production, run as a separate service
+- Switching to MPEG-DASH: adjust FFmpeg command and routes accordingly
+- Scaling:
+  - Horizontal scale API and Workers; Redis centralizes queue state
+  - Use MinIO/S3 for shared storage across replicas
+  - Consider CDN in front of `/videos/*` for production delivery
+
+## Test Quickly
+- Upload:
+
+```bash
+curl -F file=@sample.mp4 http://localhost:3000/upload
+```
+
+- Play (once ready):
+
+```bash
+curl http://localhost:3000/videos/<id>/hls/master.m3u8
+```
 
