@@ -2,14 +2,14 @@
 
 ```mermaid
 flowchart LR
-  U[Client] -->|multipart/form-data| A[API (Express)]
-  A -->|stream→disk| D[Uploads Storage]
-  A -->|enqueue| Q[BullMQ (Redis)]
-  Q --> W[Worker (FFmpeg)]
-  W -->|HLS outputs| M[(MinIO S3)]
-  P[HLS Player] -->|GET master/variants| S[Streaming Endpoints]
-  S -. Range 206 & stream .-> M
-  A --- S
+  Client -->|upload (multipart)| API
+  API -->|stream to disk| Uploads
+  API -->|enqueue job| Queue
+  Queue --> Worker
+  Worker -->|HLS outputs| MinIO
+  Player -->|GET playlists| Streaming
+  Streaming -. Range 206 and piping .-> MinIO
+  API --- Streaming
 ```
 
 ## Snapshot (10s read)
@@ -99,4 +99,3 @@ curl -F file=@sample.mp4 http://localhost:3000/upload
 ```bash
 curl http://localhost:3000/videos/<id>/hls/master.m3u8
 ```
-
